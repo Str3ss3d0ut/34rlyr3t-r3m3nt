@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 # --- 1. App Title and Setup ---
 st.set_page_config(page_title="My Alpha Screener", layout="wide")
-st.title("🚀 Personal Stock Alpha Screener (Future Wealth Edition)")
+st.title("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀")
 
 # --- Sector Map ---
 SECTOR_MAP = {
@@ -419,4 +419,5 @@ with tab3:
                 st.dataframe(df_w.style.format({"Price": "${:.2f}", "From High %": "{:.2f}%", "3M Return %": "{:.2f}%"}).background_gradient(subset=["3M Return %"], cmap="Greens"))
                 st.code(", ".join(df_w['Ticker'].tolist()))
             else: st.warning("No matches found.")
+
         except Exception as e: st.error(f"Scanner Error: {e}")
