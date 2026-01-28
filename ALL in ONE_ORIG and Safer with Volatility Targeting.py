@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 # --- 1. App Title and Setup ---
 st.set_page_config(page_title="My Alpha Screener", layout="wide")
-st.title("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀")
+st.title("🚀 Personal Stock Alpha Screener (Future Wealth Edition)")
 
 # --- Sector Map ---
 SECTOR_MAP = {
@@ -33,7 +33,9 @@ st.sidebar.header("User Input")
 with st.sidebar.expander("📝 Edit Watchlist", expanded=False):
     ticker_input = st.text_area("Enter Tickers:", default_tickers, height=150)
 
-stop_loss_pct = st.sidebar.slider("Trailing Stop Loss %", 5, 40, 30, 1) / 100
+# Note: This slider is now used primarily for the Backtest and Manual Tool.
+# Tab 1 now uses 3xATR automatically.
+stop_loss_pct = st.sidebar.slider("Trailing Stop Loss % (Backtest Only)", 5, 40, 30, 1) / 100
 max_positions = st.sidebar.slider("Number of Positions", 1, 5, 1, help="1 = Sniper Mode.")
 allocation_pct = st.sidebar.slider("Max Capital Allocation %", 50, 100, 80, 5) / 100
 
@@ -56,6 +58,59 @@ monthly_contribution = st.sidebar.slider("Monthly Savings Add ($)", 0, 2000, 500
 
 tickers = [x.strip().upper() for x in ticker_input.split(',') if x.strip()]
 
+# --- HELPER FUNCTIONS & CACHING ---
+@st.cache_data(ttl=3600) # Cache Yahoo Data for 1 Hour
+def get_data(ticker_list, period, interval="1d", group_by='ticker'):
+    return yf.download(ticker_list, period=period, interval=interval, group_by=group_by, auto_adjust=True, threads=True)
+
+@st.cache_data(ttl=86400) # Cache Wikipedia Data for 24 Hours
+def get_wiki_tickers(url):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers)
+    return pd.read_html(io.StringIO(response.text))[0]
+
+def calculate_kama(df, n=10, pow1=2, pow2=30):
+    """Calculates Kaufman's Adaptive Moving Average (KAMA) for noise filtering."""
+    try:
+        if len(df) < n: return pd.Series([0]*len(df), index=df.index)
+        df = df.copy()
+        change = abs(df['Close'] - df['Close'].shift(n))
+        volatility = abs(df['Close'] - df['Close'].shift(1)).rolling(window=n).sum()
+        er = change / volatility
+        sc_fatest = 2 / (pow1 + 1)
+        sc_slowest = 2 / (pow2 + 1)
+        sc = (er * (sc_fatest - sc_slowest) + sc_slowest) ** 2
+        kama = pd.Series(index=df.index, dtype='float64')
+        kama.iloc[n-1] = df['Close'].iloc[n-1]
+        for i in range(n, len(df)):
+            kama.iloc[i] = kama.iloc[i-1] + sc.iloc[i] * (df['Close'].iloc[i] - kama.iloc[i-1])
+        return kama
+    except:
+        return pd.Series([0]*len(df), index=df.index)
+
+def calculate_adx(df, n=14):
+    """Calculates ADX to determine trend strength (0-100)."""
+    try:
+        df = df.copy()
+        df['H-L'] = df['High'] - df['Low']
+        df['H-C'] = abs(df['High'] - df['Close'].shift(1))
+        df['L-C'] = abs(df['Low'] - df['Close'].shift(1))
+        df['TR'] = df[['H-L', 'H-C', 'L-C']].max(axis=1)
+        
+        df['UpMove'] = df['High'] - df['High'].shift(1)
+        df['DownMove'] = df['Low'].shift(1) - df['Low']
+        
+        df['+DM'] = np.where((df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), df['UpMove'], 0)
+        df['-DM'] = np.where((df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), df['DownMove'], 0)
+        
+        df['+DI'] = 100 * (df['+DM'].rolling(window=n).mean() / df['TR'].rolling(window=n).mean())
+        df['-DI'] = 100 * (df['-DM'].rolling(window=n).mean() / df['TR'].rolling(window=n).mean())
+        df['DX'] = 100 * abs((df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI']))
+        df['ADX'] = df['DX'].rolling(window=n).mean()
+        return df['ADX'].iloc[-1]
+    except:
+        return 0
+
 # --- DAILY TRADING TOOLS ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧮 Daily Tools")
@@ -64,6 +119,7 @@ with st.sidebar.expander("Stop Loss Calculator", expanded=True):
     curr_high = st.number_input("Stock High ($)", value=0.0)
     if curr_high > 0:
         st.error(f"Set Broker Stop Order to: **${curr_high * (1 - stop_loss_pct):.2f}**")
+        st.caption("Note: This simple tool uses the slider %. For ATR stops, check the Live Screener.")
 
 with st.sidebar.expander("🏠 House Money Tracker", expanded=True):
     entry_p = st.number_input("Your Entry Price ($)", value=0.0)
@@ -89,7 +145,7 @@ tab1, tab2, tab3 = st.tabs(["📊 Live Screener & Sizing", "📉 Backtest & Weal
 with tab1:
     with st.expander("👮 Pre-Flight Checklist"):
         st.markdown("""
-        1. **Earnings Check:** Does the stock report earnings in the next 5 days? (If YES -> WAIT).
+        1. **Earnings Check:** Does the stock report earnings in the next 5 days? (Now automated in Signal).
         2. **Time Check:** Is it the last trading day of the month?
         """)
     
@@ -114,8 +170,9 @@ with tab1:
             status_text.text(f"⏳ Downloading data for {len(tickers)} stocks (Batch Mode)...")
             
             try:
-                data = yf.download(tickers, period="6mo", group_by='ticker', auto_adjust=True, threads=True)
-                status_text.text("✅ Data Downloaded. Processing Signals...")
+                # --- CACHED CALL ---
+                data = get_data(tickers, period="6mo", group_by='ticker')
+                status_text.text("✅ Data Downloaded. Processing Signals & Earnings...")
                 
                 alpha_data = []
                 for symbol in tickers:
@@ -147,35 +204,89 @@ with tab1:
                         r1m = ((current_price / hist['Close'].iloc[-22]) - 1) * 100 if len(hist) >= 22 else 0
                         r3m = ((current_price / hist['Close'].iloc[-64]) - 1) * 100 if len(hist) >= 64 else 0
                         
-                        sma_50 = hist['Close'].tail(50).mean()
-                        trend_status = "UP" if current_price > sma_50 else "DOWN"
+                        # --- KAMA UPGRADE IN TAB 1 ---
+                        kama_series = calculate_kama(hist)
+                        trend_status = "UP" if current_price > kama_series.iloc[-1] else "DOWN"
+                        
+                        # --- ADX FILTER ---
+                        adx_val = calculate_adx(hist)
+                        
                         raw_momentum = (r1m * 2) + r3m
                         alpha_score = (raw_momentum / 100) / volatility_20
                         
                         signal = ""
+                        earnings_warning = False
+                        days_to_earn = None
+                        
+                        # --- SIGNAL LOGIC ---
                         if trend_status == "DOWN":
                             signal = "❄️ COLD"
                         elif alpha_score <= 0:
                             signal = "WAIT (Score)"
                         elif vol_ratio < vol_threshold:
                             signal = "WAIT (Low Vol)"
+                        elif adx_val < 20:
+                            signal = "WAIT (Choppy)" # ADX Logic
                         else:
-                            signal = "🔥 HOT"
+                            # --- ROBUST MULTI-PASS EARNINGS LOGIC ---
+                            try:
+                                t_obj = yf.Ticker(symbol)
+                                next_earn = None
+                                
+                                # Pass 1: DataFrame Calendar
+                                cal = t_obj.calendar
+                                if isinstance(cal, pd.DataFrame) and not cal.empty:
+                                    if 'Earnings Date' in cal.columns: next_earn = cal['Earnings Date'].iloc[0]
+                                    elif 0 in cal.columns: next_earn = cal.iloc[0, 0]
+                                # Pass 2: Dictionary Calendar
+                                elif isinstance(cal, dict) and 'Earnings Date' in cal:
+                                    next_earn = cal['Earnings Date'][0]
+                                
+                                # Pass 3: Metadata / get_earnings_dates Fallback
+                                if next_earn is None:
+                                    try:
+                                        dates_df = t_obj.get_earnings_dates(limit=2)
+                                        if dates_df is not None and not dates_df.empty:
+                                            future_dates = dates_df.index[dates_df.index >= pd.Timestamp.now().floor('D')]
+                                            if not future_dates.empty: next_earn = future_dates[0]
+                                    except: pass
+
+                                if next_earn:
+                                    # Normalize to simple datetime
+                                    next_earn = pd.to_datetime(next_earn).tz_localize(None)
+                                    days_to_earn = (next_earn - datetime.now()).days
+                                    # Catch earnings today(0), tomorrow(1) or next week
+                                    if 0 <= days_to_earn <= 7:
+                                        earnings_warning = True
+                            except:
+                                pass 
+                            
+                            if earnings_warning:
+                                signal = "⚠️ EARNINGS"
+                            else:
+                                signal = "🔥 HOT"
+
+                        # --- NEW: ATR 3x STOP LOSS CALCULATION ---
+                        h_l = hist['High'] - hist['Low']
+                        h_pc = (hist['High'] - hist['Close'].shift(1)).abs()
+                        l_pc = (hist['Low'] - hist['Close'].shift(1)).abs()
+                        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+                        atr_14 = tr.rolling(14).mean().iloc[-1] # 14-Day ATR
 
                         # --- SIZING LOGIC ---
-                        # 1. Base Allocation (Sniper)
                         base_alloc = allocation_pct
-                        
-                        # 2. Volatility Target Adjustment (Preservation)
                         if use_vol_target and ann_volatility > 0:
                             vol_alloc = target_vol_ann / ann_volatility
-                            final_alloc = min(base_alloc, vol_alloc) # Cap at max alloc
+                            final_alloc = min(base_alloc, vol_alloc)
                         else:
                             final_alloc = base_alloc
                         
                         capital_per_trade = (account_balance_input * final_alloc) / max_positions
                         shares_to_buy = capital_per_trade / current_price
-                        initial_stop = current_price * (1 - stop_loss_pct)
+                        
+                        atr_stop_dist = atr_14 * 3 
+                        initial_stop = current_price - atr_stop_dist
+                        stop_pct_equivalent = (atr_stop_dist / current_price) * 100
 
                         alpha_data.append({
                             "Symbol": symbol,
@@ -186,8 +297,11 @@ with tab1:
                             "Signal": signal,
                             "Vol Ratio": vol_ratio,
                             "Score (Risk Adj)": alpha_score,
+                            "ADX": adx_val,
                             "Ann Vol": ann_volatility,
                             "Alloc %": final_alloc * 100,
+                            "ATR Stop %": stop_pct_equivalent, 
+                            "Days to Earn": days_to_earn,
                             "Link": f"https://finance.yahoo.com/quote/{symbol}"
                         })
                     except Exception as e:
@@ -197,13 +311,16 @@ with tab1:
                 if alpha_data:
                     df = pd.DataFrame(alpha_data).sort_values(by="Score (Risk Adj)", ascending=False).reset_index(drop=True)
                     top_stock = df.iloc[0]
+                    
                     if top_stock['Signal'] == "🔥 HOT":
                         st.success(f"🏆 Top Alpha: **{top_stock['Symbol']}** | Buy **{top_stock['SHARES']:.4f}** shares")
                         if use_vol_target:
                             st.info(f"🛡️ Vol Target Active: Allocation reduced to **{top_stock['Alloc %']:.1f}%** due to volatility ({top_stock['Ann Vol']:.1%}).")
                         else:
                             st.info(f"🚀 Sniper Mode: Full **{top_stock['Alloc %']:.0f}%** Allocation.")
-                        st.error(f"🛑 **Set Initial Stop:** ${top_stock['Stop Price']:.2f}")
+                        st.error(f"🛑 **Set Initial Stop:** ${top_stock['Stop Price']:.2f} (This is a {top_stock['ATR Stop %']:.1f}% Trailing Stop)")
+                    elif "EARNINGS" in top_stock['Signal']:
+                        st.warning(f"⚠️ Top stock ({top_stock['Symbol']}) has EARNINGS coming up. Risk of 20% gap. SKIP.")
                     else:
                         st.warning(f"🏆 Top stock ({top_stock['Symbol']}) is {top_stock['Signal']}. Reason: {top_stock['Signal']}")
                     
@@ -214,10 +331,13 @@ with tab1:
                             "Score (Risk Adj)": st.column_config.ProgressColumn("Score", min_value=-5, max_value=5, format="%.2f"),
                             "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
                             "Vol Ratio": st.column_config.NumberColumn("Vol Ratio", format="%.2f"),
+                            "ADX": st.column_config.NumberColumn("ADX (Trend)", format="%.0f"),
+                            "ATR Stop %": st.column_config.NumberColumn("ATR Stop %", format="%.1f%%"),
                             "Ann Vol": st.column_config.NumberColumn("Ann Vol", format="%.1%"),
                             "Alloc %": st.column_config.NumberColumn("Alloc %", format="%.1f%%"),
+                            "Days to Earn": st.column_config.NumberColumn("Days to Earn", format="%d"),
                         },
-                        column_order=("Symbol", "Price", "Signal", "Alloc %", "SHARES", "Stop Price", "Vol Ratio", "Score (Risk Adj)", "Link")
+                        column_order=("Symbol", "Price", "Signal", "Days to Earn", "Alloc %", "SHARES", "Stop Price", "ATR Stop %", "Vol Ratio", "ADX", "Score (Risk Adj)", "Link")
                     )
                 else:
                     st.error("❌ No data returned.")
@@ -235,11 +355,18 @@ with tab2:
     if st.button("Run Full Wealth Analysis"):
         with st.spinner("Processing 5 years of data..."):
             all_tickers = tickers + ["SPY"]
-            data = yf.download(all_tickers, period="5y", interval="1d", progress=False, threads=False, auto_adjust=True)
+            data = get_data(all_tickers, period="5y", interval="1d", group_by='column')
+            
             if isinstance(data.columns, pd.MultiIndex):
                 try: data = data['Close']
                 except KeyError: pass
             
+            # --- BACKTEST SPEED OPTIMIZATION (Pre-calculate KAMA) ---
+            kama_data = {}
+            for tick in tickers:
+                if tick in data.columns:
+                    kama_data[tick] = calculate_kama(data[[tick]].rename(columns={tick: 'Close'}))
+
             daily_returns = data.pct_change()
             rolling_volatility = daily_returns.rolling(window=20).std() * np.sqrt(20) # Monthly Vol
             annualized_volatility = daily_returns.rolling(window=20).std() * np.sqrt(252) # Annual Vol for Sizing
@@ -259,33 +386,37 @@ with tab2:
             for i in range(4, len(monthly_data)-1):
                 dt, nxt_dt = monthly_data.index[i], monthly_data.index[i+1]
                 
-                # Monthly Contribution
                 strat_bal += monthly_contribution
                 save_bal += monthly_contribution
                 bench_bal += monthly_contribution
+                
+                # --- FIX FOR KEYERROR: Use .asof to ensure weekend dates don't crash ---
+                valid_dt = data.index.asof(dt)
+                valid_nxt = data.index.asof(nxt_dt)
                 
                 scores = {}
                 for tick in tickers:
                     if tick not in data.columns: continue
                     try:
-                        ret_1m = (monthly_data.loc[dt, tick] - monthly_data.iloc[i-1][tick]) / monthly_data.iloc[i-1][tick]
-                        ret_3m = (monthly_data.loc[dt, tick] - monthly_data.iloc[i-3][tick]) / monthly_data.iloc[i-3][tick]
-                        vol = monthly_vol.loc[dt, tick]
-                        if pd.isna(vol) or vol == 0: vol = 1.0
-                        raw_momentum = (ret_1m * 2) + ret_3m
-                        scores[tick] = (raw_momentum / vol) if raw_momentum > 0 else raw_momentum
+                        # Use optimized pre-calculated KAMA
+                        if data[tick].loc[valid_dt] > kama_data[tick].loc[valid_dt]:
+                            ret_1m = (monthly_data.loc[dt, tick] - monthly_data.iloc[i-1][tick]) / monthly_data.iloc[i-1][tick]
+                            ret_3m = (monthly_data.loc[dt, tick] - monthly_data.iloc[i-3][tick]) / monthly_data.iloc[i-3][tick]
+                            vol = monthly_vol.loc[dt, tick]
+                            if pd.isna(vol) or vol == 0: vol = 1.0
+                            raw_momentum = (ret_1m * 2) + ret_3m
+                            scores[tick] = (raw_momentum / vol) if raw_momentum > 0 else raw_momentum
                     except: scores[tick] = -999 
                 
                 top_picks = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:max_positions]
                 
                 global_bull = True
-                if use_regime and monthly_data.loc[dt, "SPY"] < monthly_sma.loc[dt]: global_bull = False
+                if use_regime and data["SPY"].loc[valid_dt] < spy_200_sma.loc[valid_dt]: global_bull = False
 
                 m_rets = []
                 if global_bull:
                     for s_name, s_score in top_picks:
                         if s_score > 0:
-                            # --- SIZING LOGIC FOR BACKTEST ---
                             curr_ann_vol = monthly_ann_vol.loc[dt, s_name]
                             if use_vol_target and not pd.isna(curr_ann_vol) and curr_ann_vol > 0:
                                 vol_alloc = target_vol_ann / curr_ann_vol
@@ -293,8 +424,8 @@ with tab2:
                             else:
                                 dynamic_alloc = allocation_pct
                             
-                            buy_p = monthly_data.loc[dt, s_name]
-                            d_slice = data.loc[dt:nxt_dt, s_name]
+                            buy_p = data[s_name].loc[valid_dt]
+                            d_slice = data.loc[valid_dt:valid_nxt, s_name]
                             if not d_slice.empty:
                                 peak, exit_p = buy_p, d_slice.iloc[-1]
                                 for p in d_slice:
@@ -307,7 +438,7 @@ with tab2:
                 else: m_rets = [0.0] * max_positions
 
                 avg_m_ret = sum(m_rets) / len(m_rets) if m_rets else 0.0
-                spy_ret = (monthly_data.loc[nxt_dt, "SPY"] / monthly_data.loc[dt, "SPY"]) - 1
+                spy_ret = (data["SPY"].loc[valid_nxt] / data["SPY"].loc[valid_dt]) - 1
                 
                 strat_bal *= (1 + avg_m_ret)
                 bench_bal *= (1 + spy_ret)
@@ -382,13 +513,13 @@ with tab3:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies'
         
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(url, headers=headers)
-            sp_df = pd.read_html(io.StringIO(response.text))[0]
+            # --- CACHED WIKIPEDIA CALL ---
+            sp_df = get_wiki_tickers(url)
             tickers_list = [t.replace('.', '-') for t in sp_df['Symbol'].tolist()]
             
             status_text.text(f"✅ Found {len(tickers_list)} tickers. Step 2: Downloading data...")
-            data = yf.download(tickers_list + ["SPY"], period="6mo", group_by='ticker', auto_adjust=True, threads=True)
+            # --- CACHED DATA CALL ---
+            data = get_data(tickers_list + ["SPY"], period="6mo", group_by='ticker')
             
             status_text.text("✅ Data Downloaded. Step 3: Filtering...")
             winners = []
@@ -417,7 +548,7 @@ with tab3:
             if winners:
                 df_w = pd.DataFrame(winners).sort_values("3M Return %", ascending=False).reset_index(drop=True)
                 st.dataframe(df_w.style.format({"Price": "${:.2f}", "From High %": "{:.2f}%", "3M Return %": "{:.2f}%"}).background_gradient(subset=["3M Return %"], cmap="Greens"))
+                # --- RESTORED COPY-PASTE TEXT BOX ---
                 st.code(", ".join(df_w['Ticker'].tolist()))
             else: st.warning("No matches found.")
-
         except Exception as e: st.error(f"Scanner Error: {e}")
