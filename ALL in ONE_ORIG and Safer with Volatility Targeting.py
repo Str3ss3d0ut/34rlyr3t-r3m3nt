@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 # --- 1. App Title and Setup ---
 st.set_page_config(page_title="My Alpha Screener", layout="wide")
-st.title("🚀 Personal Stock Alpha Screener (Future Wealth Edition)")
+st.title("🚀 Tr4d3 S3cr3t - Discord Edition")
 
 # --- Sector Map ---
 SECTOR_MAP = {
@@ -286,6 +286,9 @@ with tab1:
                         
                         atr_stop_dist = atr_14 * 3 
                         initial_stop = current_price - atr_stop_dist
+                        # NEW: Stop from Highest High
+                        trail_stop_high = hist['High'].iloc[-1] - atr_stop_dist
+                        
                         stop_pct_equivalent = (atr_stop_dist / current_price) * 100
 
                         alpha_data.append({
@@ -294,6 +297,8 @@ with tab1:
                             "Price": current_price,
                             "SHARES": shares_to_buy, 
                             "Stop Price": initial_stop,
+                            "Trail Stop (High)": trail_stop_high, 
+                            "Highest High 1D": hist['High'].iloc[-1], # New Added Row
                             "Signal": signal,
                             "Vol Ratio": vol_ratio,
                             "Score (Risk Adj)": alpha_score,
@@ -336,8 +341,11 @@ with tab1:
                             "Ann Vol": st.column_config.NumberColumn("Ann Vol", format="%.1%"),
                             "Alloc %": st.column_config.NumberColumn("Alloc %", format="%.1f%%"),
                             "Days to Earn": st.column_config.NumberColumn("Days to Earn", format="%d"),
+                            "Trail Stop (High)": st.column_config.NumberColumn("Trail Stop (High)", format="$%.2f"),
+                            "Highest High 1D": st.column_config.NumberColumn("Highest High 1D", format="$%.2f"), # Config
                         },
-                        column_order=("Symbol", "Price", "Signal", "Days to Earn", "Alloc %", "SHARES", "Stop Price", "ATR Stop %", "Vol Ratio", "ADX", "Score (Risk Adj)", "Link")
+                        # Added "Highest High 1D" to the order below
+                        column_order=("Symbol", "Price", "Signal", "Days to Earn", "Alloc %", "SHARES", "Stop Price", "Highest High 1D", "Trail Stop (High)", "ATR Stop %", "Vol Ratio", "ADX", "Score (Risk Adj)", "Link")
                     )
                 else:
                     st.error("❌ No data returned.")
