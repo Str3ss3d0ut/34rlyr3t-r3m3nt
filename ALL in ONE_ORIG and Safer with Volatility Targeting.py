@@ -13,7 +13,6 @@ from email.mime.multipart import MIMEMultipart # For Email Structure
 from datetime import datetime, timedelta
 
 # --- TRY IMPORTING GOOGLE SHEETS LIBRARIES ---
-# If these fail, the app will just default to CSV mode without crashing.
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -44,8 +43,36 @@ default_tickers = (
 # --- SIDEBAR INPUTS ---
 st.sidebar.header("User Input")
 
+# --- NEW: WATCHLIST STATE MANAGEMENT ---
+if "watchlist_content" not in st.session_state:
+    st.session_state.watchlist_content = default_tickers
+
+# --- NEW: SAVE / LOAD BUTTONS ---
+with st.sidebar.expander("📂 Manage Watchlist (Save/Load)", expanded=False):
+    col_load, col_save = st.columns(2)
+    
+    # LOAD
+    uploaded_file = st.file_uploader("Load .txt", type=["txt", "json"])
+    if uploaded_file is not None:
+        string_data = uploaded_file.getvalue().decode("utf-8")
+        # Only update if different to prevent loop
+        if string_data != st.session_state.watchlist_content:
+            st.session_state.watchlist_content = string_data
+            st.rerun() # Refresh app with new tickers
+
+    # SAVE
+    st.download_button(
+        label="💾 Save List",
+        data=st.session_state.watchlist_content,
+        file_name="my_watchlist.txt",
+        mime="text/plain",
+        help="Download current tickers as a text file."
+    )
+
 with st.sidebar.expander("📝 Edit Watchlist", expanded=False):
-    ticker_input = st.text_area("Enter Tickers:", default_tickers, height=150)
+    ticker_input = st.text_area("Enter Tickers:", value=st.session_state.watchlist_content, height=150)
+    # Sync manual typing back to state for the save button
+    st.session_state.watchlist_content = ticker_input
 
 # Note: This slider is now used primarily for the Backtest and Manual Tool.
 # Tab 1 now uses 3xATR automatically.
@@ -493,7 +520,7 @@ with tab1:
                                     st.error(msg)
                     # --- MANUAL BUTTON (BACKUP) ---
                     elif st.button("📧 Email Top 10 Picks"): # This might still have reset issues without session state, but checkbox is preferred.
-                         st.warning("⚠️ Please use the 'Auto-email' checkbox above the Scan button for better reliability!")
+                          st.warning("⚠️ Please use the 'Auto-email' checkbox above the Scan button for better reliability!")
 
                 else:
                     st.error("❌ No data returned.")
