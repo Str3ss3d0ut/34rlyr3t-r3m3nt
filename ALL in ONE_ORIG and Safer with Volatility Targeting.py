@@ -37,7 +37,7 @@ SECTOR_MAP = {
 
 # Default Universe
 default_tickers = (
-    ""
+    "SNDK, WDC, MU, TER, STX, LRCX, INTC, WBD, ALB, FIX, NEM, CHRW, AMAT, GLW, GOOGL, GOOG, KLAC, HII, GM, CMI, CNC, HAL, CAT, APH, MRNA, BG, MPWR, TMO, LMT, VTRS, SLB, APA, EXPD, ROST, IVZ, LLY, JBHT, CRL, MRK, WAT, GS, MNST, STLD, ULTA, DG, BKR, DD, TECH, CVS, FDX, RTX, CAH, EL, CVNA, FCX, CFG, ELV, LHX, MS, PH, JNJ, VLO, KEYS, FOXA, ADI, EA, RL, IQV, FOX, DHR, AIZ, PCAR, NUE, EPAM, F, FITB, NDSN, TPR, XOM, WMT, TJX, DAL, ADM, LOW, GD, AME, GE, HWM, USB, BK, PLD, IBKR, WSM, RVTY, PWR, ROK, LDOS, EIX, CBRE, GILD, NOC, KEY, TRGP, MTD, DAY, MAR, VTR, SWK, STE, HST, DVN, AKAM, PNC, LUV, BMY, FE, PFG, NTRS, CTRA, HAS, BDX, HOLX, JBL, ROL, HBAN, SPG, PSX, AMGN, CVX, GL, SNA, TFC, HUBB, CBOE, MTB, COO, MLM, MSCI, EVRG, TSN, VMC, WMB, TXT, TDY, NDAQ, EW, RF, TPL, UPS, DOV, CTSH, MDT, WAB, O, AEP, NEE"
 )
 
 # --- SIDEBAR INPUTS ---
@@ -70,9 +70,13 @@ with st.sidebar.expander("📂 Manage Watchlist (Save/Load)", expanded=False):
     )
 
 with st.sidebar.expander("📝 Edit Watchlist", expanded=False):
-    ticker_input = st.text_area("Enter Tickers:", value=st.session_state.watchlist_content, height=150)
-    # Sync manual typing back to state for the save button
-    st.session_state.watchlist_content = ticker_input
+    # Using a form here prevents reload on every keystroke
+    with st.form("ticker_form"):
+        ticker_input = st.text_area("Enter Tickers:", value=st.session_state.watchlist_content, height=150)
+        submit_tickers = st.form_submit_button("Update Watchlist")
+        if submit_tickers:
+            st.session_state.watchlist_content = ticker_input
+            st.rerun()
 
 # Note: This slider is now used primarily for the Backtest and Manual Tool.
 # Tab 1 now uses 3xATR automatically.
@@ -108,7 +112,7 @@ with st.sidebar.expander("📧 Email Settings (Optional)"):
     email_host = st.text_input("SMTP Server:", value="smtp.gmail.com")
     email_port = st.number_input("SMTP Port:", value=587)
 
-tickers = [x.strip().upper() for x in ticker_input.split(',') if x.strip()]
+tickers = [x.strip().upper() for x in st.session_state.watchlist_content.split(',') if x.strip()]
 
 # --- HELPER FUNCTIONS & CACHING ---
 @st.cache_data(ttl=3600) # Cache Yahoo Data for 1 Hour
@@ -118,8 +122,11 @@ def get_data(ticker_list, period, interval="1d", group_by='ticker'):
 @st.cache_data(ttl=86400) # Cache Wikipedia Data for 24 Hours
 def get_wiki_tickers(url):
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers)
-    return pd.read_html(io.StringIO(response.text))[0]
+    try:
+        response = requests.get(url, headers=headers)
+        return pd.read_html(io.StringIO(response.text))[0]
+    except Exception as e:
+        return pd.DataFrame()
 
 def calculate_kama(df, n=10, pow1=2, pow2=30):
     """Calculates Kaufman's Adaptive Moving Average (KAMA) for noise filtering."""
@@ -296,14 +303,19 @@ with tab1:
         2. **Time Check:** Is it the last trading day of the month?
         """)
     
-    use_live_regime = st.checkbox("🛑 Enable Market Safety Lock (SPY > 200 SMA)?", value=True)
+    # --- FORM WRAPPER FIX: PREVENTS DOUBLE CLICK ISSUE ---
+    with st.form("live_scan_form"):
+        use_live_regime = st.checkbox("🛑 Enable Market Safety Lock (SPY > 200 SMA)?", value=True)
+        
+        # --- NEW: AUTO-EMAIL CHECKBOX ---
+        col_scan, col_check = st.columns([1, 2])
+        with col_check:
+            auto_email = st.checkbox("📧 Auto-email Top 10 results?", value=False, help="If checked, results will be emailed immediately after scanning.")
+        
+        # This button is now a Submit Button - it waits for other inputs to settle
+        run_scan = st.form_submit_button("Find Alpha (Live Scan)")
 
-    # --- NEW: AUTO-EMAIL CHECKBOX ---
-    col_scan, col_check = st.columns([1, 2])
-    with col_check:
-        auto_email = st.checkbox("📧 Auto-email Top 10 results?", value=False, help="If checked, results will be emailed immediately after scanning.")
-    
-    if col_scan.button("Find Alpha (Live Scan)"):
+    if run_scan:
         market_healthy = True
         if use_live_regime:
             with st.spinner("Checking Market Health..."):
@@ -358,7 +370,8 @@ with tab1:
                         
                         # --- KAMA UPGRADE IN TAB 1 ---
                         kama_series = calculate_kama(hist)
-                        trend_status = "UP" if current_price > kama_series.iloc[-1] else "DOWN"
+                        kama_val = kama_series.iloc[-1]
+                        trend_status = "UP" if current_price > kama_val else "DOWN"
                         
                         # --- ADX FILTER ---
                         adx_val = calculate_adx(hist)
@@ -450,8 +463,25 @@ with tab1:
 
                         stop_pct_equivalent = (atr_stop_dist / current_price) * 100
 
+                        # --- NEW: EXPLICIT SELL SIGNAL COLUMN LOGIC ---
+                        sell_reasons = []
+                        if trend_status == "DOWN":
+                            sell_reasons.append("Trend Brk")
+                        if current_price < trail_stop_high:
+                            sell_reasons.append("Stop Hit")
+                        if earnings_warning and days_to_earn <= 2:
+                            sell_reasons.append("Earn Risk")
+                        
+                        if len(sell_reasons) > 0:
+                            action_col = f"SELL ({', '.join(sell_reasons)})"
+                        elif signal == "🔥 HOT":
+                            action_col = "BUY"
+                        else:
+                            action_col = "WAIT"
+
                         alpha_data.append({
                             "Symbol": symbol,
+                            "Zone/Action": action_col, 
                             "Sector": SECTOR_MAP.get(symbol, "Growth"),
                             "Price": current_price,
                             "SHARES": shares_to_buy, 
@@ -492,6 +522,7 @@ with tab1:
                         df,
                         column_config={
                             "Link": st.column_config.LinkColumn("News"),
+                            "Zone/Action": st.column_config.TextColumn("Zone/Action", help="BUY = Good Trend. SELL = Stop hit or Trend broken."),
                             "Score (Risk Adj)": st.column_config.ProgressColumn("Score", min_value=-5, max_value=5, format="%.2f"),
                             "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
                             "Vol Ratio": st.column_config.NumberColumn("Vol Ratio", format="%.2f"),
@@ -503,7 +534,7 @@ with tab1:
                             "Trail Stop (High)": st.column_config.NumberColumn("Trail Stop (High)", format="$%.2f"),
                             "Highest High (20D)": st.column_config.NumberColumn("Highest High (20D)", format="$%.2f"),
                         },
-                        column_order=("Symbol", "Price", "Signal", "Days to Earn", "Alloc %", "SHARES", "Stop Price", "Highest High (20D)", "Trail Stop (High)", "ATR Stop %", "Vol Ratio", "ADX", "Score (Risk Adj)", "Link")
+                        column_order=("Symbol", "Zone/Action", "Price", "Signal", "Days to Earn", "Alloc %", "SHARES", "Stop Price", "ATR Stop %", "Vol Ratio", "ADX", "Score (Risk Adj)", "Link")
                     )
 
                     # --- AUTO EMAIL LOGIC ---
@@ -518,10 +549,6 @@ with tab1:
                                     st.success(msg)
                                 else:
                                     st.error(msg)
-                    # --- MANUAL BUTTON (BACKUP) ---
-                    elif st.button("📧 Email Top 10 Picks"): # This might still have reset issues without session state, but checkbox is preferred.
-                          st.warning("⚠️ Please use the 'Auto-email' checkbox above the Scan button for better reliability!")
-
                 else:
                     st.error("❌ No data returned.")
             except Exception as e:
@@ -680,13 +707,19 @@ with tab2:
 # ==========================================
 with tab3:
     st.header("🔎 Sniper Universe Scanner")
-    index_choice = st.radio("Select Universe:", ["S&P 500 (Large Cap)", "S&P 400 (Mid Cap)"], index=0, horizontal=True)
     
-    c1, c2 = st.columns(2)
-    dist_threshold = c1.slider("Max % from 52W High", 1, 20, 10) / 100
-    min_volume = c2.number_input("Min Daily Volume ($M)", value=50)
+    # --- FORM WRAPPER FIX: PREVENTS DOUBLE CLICK ISSUE ---
+    with st.form("sp500_scanner_form"):
+        index_choice = st.radio("Select Universe:", ["S&P 500 (Large Cap)", "S&P 400 (Mid Cap)"], index=0, horizontal=True)
+        
+        c1, c2 = st.columns(2)
+        dist_threshold = c1.slider("Max % from 52W High", 1, 20, 10) / 100
+        min_volume = c2.number_input("Min Daily Volume ($M)", value=50)
 
-    if st.button("Scan Market (Batch Mode)"):
+        # This button triggers the form
+        run_scan_sp = st.form_submit_button("Scan Market (Batch Mode)")
+
+    if run_scan_sp:
         status_text = st.empty()
         if "500" in index_choice:
             status_text.text("⏳ Step 1: Fetching S&P 500 list...")
@@ -833,4 +866,3 @@ with tab4:
         ```
         5. **Share the Sheet:** Create a new Google Sheet named `AlphaPortfolio` and **Share** it with the `client_email` found in your JSON key.
         """)
-
