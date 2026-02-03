@@ -37,7 +37,7 @@ SECTOR_MAP = {
 
 # Default Universe
 default_tickers = (
-    "SNDK, WDC, MU, TER, STX, LRCX, INTC, WBD, ALB, FIX, NEM, CHRW, AMAT, GLW, GOOGL, GOOG, KLAC, HII, GM, CMI, CNC, HAL, CAT, APH, MRNA, BG, MPWR, TMO, LMT, VTRS, SLB, APA, EXPD, ROST, IVZ, LLY, JBHT, CRL, MRK, WAT, GS, MNST, STLD, ULTA, DG, BKR, DD, TECH, CVS, FDX, RTX, CAH, EL, CVNA, FCX, CFG, ELV, LHX, MS, PH, JNJ, VLO, KEYS, FOXA, ADI, EA, RL, IQV, FOX, DHR, AIZ, PCAR, NUE, EPAM, F, FITB, NDSN, TPR, XOM, WMT, TJX, DAL, ADM, LOW, GD, AME, GE, HWM, USB, BK, PLD, IBKR, WSM, RVTY, PWR, ROK, LDOS, EIX, CBRE, GILD, NOC, KEY, TRGP, MTD, DAY, MAR, VTR, SWK, STE, HST, DVN, AKAM, PNC, LUV, BMY, FE, PFG, NTRS, CTRA, HAS, BDX, HOLX, JBL, ROL, HBAN, SPG, PSX, AMGN, CVX, GL, SNA, TFC, HUBB, CBOE, MTB, COO, MLM, MSCI, EVRG, TSN, VMC, WMB, TXT, TDY, NDAQ, EW, RF, TPL, UPS, DOV, CTSH, MDT, WAB, O, AEP, NEE"
+    ""
 )
 
 # --- SIDEBAR INPUTS ---
@@ -833,3 +833,4 @@ with tab4:
         ```
         5. **Share the Sheet:** Create a new Google Sheet named `AlphaPortfolio` and **Share** it with the `client_email` found in your JSON key.
         """)
+
