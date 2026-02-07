@@ -13,6 +13,7 @@ from email.mime.multipart import MIMEMultipart # For Email Structure
 from datetime import datetime, timedelta
 
 # --- TRY IMPORTING GOOGLE SHEETS LIBRARIES ---
+# If these fail, the app will just default to CSV mode without crashing.
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -22,7 +23,7 @@ except ImportError:
 
 # --- 1. App Title and Setup ---
 st.set_page_config(page_title="My Alpha Screener", layout="wide")
-st.title("🚀 Personal Stock Alpha Screener (Future Wealth Edition)")
+st.title("🚀 Personal Stock Alpha Screener (Sniper + RS Enhanced)")
 
 # --- Sector Map ---
 SECTOR_MAP = {
@@ -43,40 +44,25 @@ default_tickers = (
 # --- SIDEBAR INPUTS ---
 st.sidebar.header("User Input")
 
-# --- NEW: WATCHLIST STATE MANAGEMENT ---
-if "watchlist_content" not in st.session_state:
-    st.session_state.watchlist_content = default_tickers
-
-# --- NEW: SAVE / LOAD BUTTONS ---
-with st.sidebar.expander("📂 Manage Watchlist (Save/Load)", expanded=False):
-    col_load, col_save = st.columns(2)
-    
-    # LOAD
-    uploaded_file = st.file_uploader("Load .txt", type=["txt", "json"])
-    if uploaded_file is not None:
-        string_data = uploaded_file.getvalue().decode("utf-8")
-        # Only update if different to prevent loop
-        if string_data != st.session_state.watchlist_content:
-            st.session_state.watchlist_content = string_data
-            st.rerun() # Refresh app with new tickers
-
-    # SAVE
-    st.download_button(
-        label="💾 Save List",
-        data=st.session_state.watchlist_content,
-        file_name="my_watchlist.txt",
-        mime="text/plain",
-        help="Download current tickers as a text file."
-    )
-
 with st.sidebar.expander("📝 Edit Watchlist", expanded=False):
-    # Using a form here prevents reload on every keystroke
-    with st.form("ticker_form"):
-        ticker_input = st.text_area("Enter Tickers:", value=st.session_state.watchlist_content, height=150)
-        submit_tickers = st.form_submit_button("Update Watchlist")
-        if submit_tickers:
-            st.session_state.watchlist_content = ticker_input
+    # 1. Initialize session state if it doesn't exist
+    if "watchlist_input" not in st.session_state:
+        st.session_state["watchlist_input"] = default_tickers
+
+    # 2. Add Buttons (Clear & Reset)
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ Clear", help="Clear text for easy pasting"):
+            st.session_state["watchlist_input"] = ""
             st.rerun()
+    with col2:
+        if st.button("🔄 Reset", help="Restore default list"):
+            st.session_state["watchlist_input"] = default_tickers
+            st.rerun()
+
+    # 3. The Text Area (Linked to Session State)
+    ticker_input = st.text_area("Enter Tickers:", key="watchlist_input", height=150)
+
 
 # Note: This slider is now used primarily for the Backtest and Manual Tool.
 # Tab 1 now uses 3xATR automatically.
@@ -112,19 +98,44 @@ with st.sidebar.expander("📧 Email Settings (Optional)"):
     email_host = st.text_input("SMTP Server:", value="smtp.gmail.com")
     email_port = st.number_input("SMTP Port:", value=587)
 
-tickers = [x.strip().upper() for x in st.session_state.watchlist_content.split(',') if x.strip()]
+tickers = [x.strip().upper() for x in ticker_input.split(',') if x.strip()]
 
 # --- HELPER FUNCTIONS & CACHING ---
 @st.cache_data(ttl=3600) # Cache Yahoo Data for 1 Hour
 def get_data(ticker_list, period, interval="1d", group_by='ticker'):
-    return yf.download(ticker_list, period=period, interval=interval, group_by=group_by, auto_adjust=True, threads=True)
+    # Ensure SPY is in the download list for RS Calculation
+    unique_tickers = list(set(ticker_list + ["SPY"]))
+    return yf.download(unique_tickers, period=period, interval=interval, group_by=group_by, auto_adjust=True, threads=True)
 
-@st.cache_data(ttl=86400) # Cache Wikipedia Data for 24 Hours
+@st.cache_data(ttl=86400)
 def get_wiki_tickers(url):
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(url, headers=headers)
-        return pd.read_html(io.StringIO(response.text))[0]
+        # S&P 500 typically has table id 'constituents'
+        # S&P 400 often has 'S&P 400 component stocks' in caption or is the first large table
+        dfs = pd.read_html(io.StringIO(response.text))
+        
+        target_df = None
+        
+        # LOGIC: Find the dataframe that has "Symbol" or "Ticker" column
+        for df in dfs:
+            # Clean columns to be case-insensitive and stripped
+            df.columns = [str(c).strip().title() for c in df.columns]
+            
+            # Common names for the ticker column on Wiki
+            if 'Symbol' in df.columns or 'Ticker' in df.columns:
+                target_df = df
+                break
+        
+        if target_df is None:
+            return pd.DataFrame() # Return empty if fail
+
+        # Standardize the ticker column name to 'Symbol'
+        if 'Ticker' in target_df.columns:
+            target_df = target_df.rename(columns={'Ticker': 'Symbol'})
+            
+        return target_df
     except Exception as e:
         return pd.DataFrame()
 
@@ -169,6 +180,36 @@ def calculate_adx(df, n=14):
         return df['ADX'].iloc[-1]
     except:
         return 0
+
+def calculate_efficiency_ratio(df, n=20):
+    """
+    Calculates the Kaufman Efficiency Ratio (0 to 1).
+    1.0 = Perfect smooth trend.
+    0.0 = Pure noise/chop.
+    """
+    try:
+        if len(df) <= n: return 0
+        # Net change over period
+        change = abs(df['Close'].iloc[-1] - df['Close'].iloc[-n-1])
+        # Sum of absolute daily changes (volatility)
+        volatility = abs(df['Close'] - df['Close'].shift(1)).tail(n).sum()
+        
+        if volatility == 0: return 0
+        return change / volatility
+    except:
+        return 0
+
+def calculate_rsi(df, n=14):
+    """Calculates RSI to detect overbought conditions."""
+    try:
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=n).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=n).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.iloc[-1]
+    except:
+        return 50 # Default to neutral if error
 
 # --- ROBUST EMAIL FUNCTION ---
 def send_email_report(df_top10, sender, password, recipient, host, port):
@@ -303,23 +344,19 @@ with tab1:
         2. **Time Check:** Is it the last trading day of the month?
         """)
     
-    # --- FORM WRAPPER FIX: PREVENTS DOUBLE CLICK ISSUE ---
-    with st.form("live_scan_form"):
-        use_live_regime = st.checkbox("🛑 Enable Market Safety Lock (SPY > 200 SMA)?", value=True)
-        
-        # --- NEW: AUTO-EMAIL CHECKBOX ---
-        col_scan, col_check = st.columns([1, 2])
-        with col_check:
-            auto_email = st.checkbox("📧 Auto-email Top 10 results?", value=False, help="If checked, results will be emailed immediately after scanning.")
-        
-        # This button is now a Submit Button - it waits for other inputs to settle
-        run_scan = st.form_submit_button("Find Alpha (Live Scan)")
+    use_live_regime = st.checkbox("🛑 Enable Market Safety Lock (SPY > 200 SMA)?", value=True)
 
-    if run_scan:
+    # --- NEW: AUTO-EMAIL CHECKBOX ---
+    col_scan, col_check = st.columns([1, 2])
+    with col_check:
+        auto_email = st.checkbox("📧 Auto-email Top 10 results?", value=False, help="If checked, results will be emailed immediately after scanning.")
+    
+    if col_scan.button("Find Alpha (Live Scan)"):
         market_healthy = True
         if use_live_regime:
             with st.spinner("Checking Market Health..."):
                 try:
+                    # Download SPY separately just for the health check visual
                     spy = yf.Ticker("SPY").history(period="1y")
                     if not spy.empty:
                         spy_curr = spy['Close'].iloc[-1]
@@ -334,13 +371,27 @@ with tab1:
             status_text.text(f"⏳ Downloading data for {len(tickers)} stocks (Batch Mode)...")
             
             try:
-                # --- CACHED CALL ---
+                # --- CACHED CALL (Includes SPY for RS calculation) ---
                 data = get_data(tickers, period="6mo", group_by='ticker')
                 status_text.text("✅ Data Downloaded. Processing Signals & Earnings...")
                 
                 alpha_data = []
+                
+                # --- NEW: PREPARE SPY DATA FOR RS CALCULATION ---
+                spy_ret_20 = 0.0
+                if "SPY" in data.columns.levels[0]:
+                    try:
+                        spy_hist = data["SPY"]
+                        # We use 21 days roughly for a month of trading
+                        if len(spy_hist) > 20:
+                             spy_ret_20 = spy_hist['Close'].pct_change(20).iloc[-1]
+                    except: pass
+                
                 for symbol in tickers:
                     try:
+                        # Skip SPY itself in the results list
+                        if symbol == "SPY": continue
+
                         if len(tickers) == 1:
                             hist = data
                         else:
@@ -355,43 +406,95 @@ with tab1:
                         current_vol_qty = hist['Volume'].iloc[-1]
                         daily_returns = hist['Close'].pct_change()
                         
-                        # Volatility Calcs
-                        daily_std = daily_returns.tail(20).std()
-                        volatility_20 = daily_std * np.sqrt(20) # Monthly proxy for ranking
-                        ann_volatility = daily_std * np.sqrt(252) # Annualized for Sizing
-                        
-                        if volatility_20 == 0: volatility_20 = 1
-                        
                         avg_vol_20 = hist['Volume'].tail(20).mean()
                         vol_ratio = current_vol_qty / avg_vol_20 if avg_vol_20 > 0 else 0
                         
-                        r1m = ((current_price / hist['Close'].iloc[-22]) - 1) * 100 if len(hist) >= 22 else 0
-                        r3m = ((current_price / hist['Close'].iloc[-64]) - 1) * 100 if len(hist) >= 64 else 0
-                        
                         # --- KAMA UPGRADE IN TAB 1 ---
                         kama_series = calculate_kama(hist)
-                        kama_val = kama_series.iloc[-1]
-                        trend_status = "UP" if current_price > kama_val else "DOWN"
+                        trend_status = "UP" if current_price > kama_series.iloc[-1] else "DOWN"
                         
                         # --- ADX FILTER ---
                         adx_val = calculate_adx(hist)
                         
-                        raw_momentum = (r1m * 2) + r3m
-                        alpha_score = (raw_momentum / 100) / volatility_20
+                        # --- ENHANCED ALPHA CALCULATION ---
+                        
+                        # 1. Volatility (Keep existing logic for sizing)
+                        daily_std = daily_returns.tail(20).std()
+                        volatility_20 = daily_std * np.sqrt(20) 
+                        ann_volatility = daily_std * np.sqrt(252)
+                        
+                        if volatility_20 == 0: volatility_20 = 1
+
+                        # 2. "Trend Quality" Fix (Efficiency Ratio)
+                        er_val = calculate_efficiency_ratio(hist, n=20)
+
+                        # --- NEW: RSI & EXTENSION CHECK (SNIPER LOGIC) ---
+                        rsi_val = calculate_rsi(hist)
+                        kama_val = kama_series.iloc[-1]
+                        
+                        # "Extension" = How far (in %) is Price from the KAMA Trend Line?
+                        # If price is > 15% away from KAMA, it's risky (Buying the top).
+                        extension_pct = ((current_price - kama_val) / kama_val) * 100
+                        
+                        # --- VELOCITY (Immediate Momentum) ---
+                        # Instead of 1-month return (too slow), look at 5-Day burst
+                        p_5d = hist['Close'].iloc[-6] if len(hist) >= 6 else current_price
+                        roc_5d = ((current_price / p_5d) - 1) * 100
+                        
+                        # --- NEW: RELATIVE STRENGTH (RS) CALCULATION ---
+                        # Compare stock's 20-day return to SPY's 20-day return
+                        stock_ret_20 = hist['Close'].pct_change(20).iloc[-1] if len(hist) > 20 else 0
+                        rs_diff = stock_ret_20 - spy_ret_20
+                        
+                        # --- 4. Final Weighted Alpha Score (REVISED) ---
+                        # We prioritize Immediate Velocity (5D) + Efficiency (Smoothness)
+                        # We DEDUCT points if it's too extended (Rubber Band penalty)
+                        # We ADD points if it is Beating the Market (RS)
+                        
+                        raw_score = (roc_5d * 2) + (er_val * 50)
+                        
+                        # RS Scoring Adjustment
+                        if rs_diff > 0: raw_score += 15  # Boost if beating SPY
+                        if rs_diff < -0.05: raw_score -= 20 # Penalty if lagging severely (>5%)
+
+                        if extension_pct > 10: raw_score -= 20  # Penalize if too far from base
+                        
+                        alpha_score = raw_score
+                        
+                        # --- 5. CONFIDENCE CALCULATION ---
+                        conf_score = 50 
+                        if er_val > 0.4: conf_score += 20    # It's a smooth trend
+                        if vol_ratio > 1.2: conf_score += 15 # Big Volume
+                        if roc_5d > 5: conf_score += 10      # Moving fast NOW
+                        if rsi_val < 70: conf_score += 10    # Not overbought yet (Good!)
+                        if extension_pct < 8: conf_score += 10 # Safe entry (Near support)
+                        if rs_diff > 0.05: conf_score += 10    # Strong Outperformance
+                        
+                        conf_score = min(100, max(0, conf_score))
                         
                         signal = ""
                         earnings_warning = False
                         days_to_earn = None
+
+                        # --- NEW: GAP UP / CHASE PROTECTION ---
+                        open_price_today = hist['Open'].iloc[-1]
+                        intraday_pct = (current_price - open_price_today) / open_price_today
                         
-                        # --- SIGNAL LOGIC ---
+                        # --- NEW SIGNAL LOGIC (Anti-Lag + RS + Gap Protection) ---
                         if trend_status == "DOWN":
                             signal = "❄️ COLD"
-                        elif alpha_score <= 0:
-                            signal = "WAIT (Score)"
+                        elif intraday_pct > 0.05:
+                            signal = "WAIT (Chasing)" # Stock is already up 5% today. Don't chase.
+                        elif rsi_val > 75:
+                            signal = "WAIT (Overbought)" # STOP BUYING TOPS
+                        elif extension_pct > 15:
+                            signal = "WAIT (Extended)"   # STOP CHASING
                         elif vol_ratio < vol_threshold:
                             signal = "WAIT (Low Vol)"
-                        elif adx_val < 20:
-                            signal = "WAIT (Choppy)" # ADX Logic
+                        elif roc_5d < 2:
+                            signal = "WAIT (Stalled)"    # Need immediate momentum
+                        elif rs_diff < 0:
+                            signal = "WAIT (Lagging)"    # Stock is weaker than SPY
                         else:
                             # --- ROBUST MULTI-PASS EARNINGS LOGIC ---
                             try:
@@ -429,7 +532,10 @@ with tab1:
                             if earnings_warning:
                                 signal = "⚠️ EARNINGS"
                             else:
-                                signal = "🔥 HOT"
+                                if extension_pct < 5: 
+                                    signal = "🔥 HOT (Perfect Entry)" # Close to KAMA line
+                                else:
+                                    signal = "🔥 HOT (Momentum)"      # Moving fast
 
                         # --- NEW: ATR 3x STOP LOSS CALCULATION ---
                         h_l = hist['High'] - hist['Low']
@@ -463,25 +569,8 @@ with tab1:
 
                         stop_pct_equivalent = (atr_stop_dist / current_price) * 100
 
-                        # --- NEW: EXPLICIT SELL SIGNAL COLUMN LOGIC ---
-                        sell_reasons = []
-                        if trend_status == "DOWN":
-                            sell_reasons.append("Trend Brk")
-                        if current_price < trail_stop_high:
-                            sell_reasons.append("Stop Hit")
-                        if earnings_warning and days_to_earn <= 2:
-                            sell_reasons.append("Earn Risk")
-                        
-                        if len(sell_reasons) > 0:
-                            action_col = f"SELL ({', '.join(sell_reasons)})"
-                        elif signal == "🔥 HOT":
-                            action_col = "BUY"
-                        else:
-                            action_col = "WAIT"
-
                         alpha_data.append({
                             "Symbol": symbol,
-                            "Zone/Action": action_col, 
                             "Sector": SECTOR_MAP.get(symbol, "Growth"),
                             "Price": current_price,
                             "SHARES": shares_to_buy, 
@@ -491,7 +580,9 @@ with tab1:
                             "Signal": signal,
                             "Vol Ratio": vol_ratio,
                             "Score (Risk Adj)": alpha_score,
+                            "Confidence": conf_score, # Raw 0-100 score
                             "ADX": adx_val,
+                            "RS vs SPY": rs_diff * 100, # Display as percentage
                             "Ann Vol": ann_volatility,
                             "Alloc %": final_alloc * 100,
                             "ATR Stop %": stop_pct_equivalent, 
@@ -503,30 +594,54 @@ with tab1:
 
                 status_text.empty()
                 if alpha_data:
-                    df = pd.DataFrame(alpha_data).sort_values(by="Score (Risk Adj)", ascending=False).reset_index(drop=True)
+                    df = pd.DataFrame(alpha_data)
+                    
+                    # --- FIX: Sort by Signal Priority (HOT first), then Score ---
+                    # HOT = 0, EARNINGS = 1, WAIT = 2, COLD = 3
+                    conditions = [
+                        df['Signal'].str.contains("HOT"),
+                        df['Signal'].str.contains("EARNINGS"),
+                        df['Signal'].str.contains("WAIT"),
+                        df['Signal'].str.contains("COLD")
+                    ]
+                    choices = [0, 1, 2, 3]
+                    df['Signal_Rank'] = np.select(conditions, choices, default=4)
+                    
+                    # Sort by Rank (Ascending) first, then Score (Descending)
+                    df = df.sort_values(by=['Signal_Rank', 'Score (Risk Adj)'], ascending=[True, False]).reset_index(drop=True)
+                    
+                    # Drop the temp column so it doesn't show in UI
+                    df = df.drop(columns=['Signal_Rank'])
+                    
                     top_stock = df.iloc[0]
                     
-                    if top_stock['Signal'] == "🔥 HOT":
-                        st.success(f"🏆 Top Alpha: **{top_stock['Symbol']}** | Buy **{top_stock['SHARES']:.4f}** shares")
-                        if use_vol_target:
-                            st.info(f"🛡️ Vol Target Active: Allocation reduced to **{top_stock['Alloc %']:.1f}%** due to volatility ({top_stock['Ann Vol']:.1%}).")
-                        else:
-                            st.info(f"🚀 Sniper Mode: Full **{top_stock['Alloc %']:.0f}%** Allocation.")
-                        st.error(f"🛑 **Set Initial Stop:** ${top_stock['Stop Price']:.2f} (This is a {top_stock['ATR Stop %']:.1f}% Trailing Stop)")
+                    if top_stock['Signal'] == "🔥 HOT (Perfect Entry)":
+                        st.success(f"🏆 Top Sniper Pick: **{top_stock['Symbol']}** | Confidence: **{top_stock['Confidence']*100:.0f}%**")
+                        st.balloons() # Special Effect for Perfect Entry
+                    elif "HOT" in top_stock['Signal']:
+                         st.success(f"🏆 Top Pick: **{top_stock['Symbol']}** | {top_stock['Signal']}")
                     elif "EARNINGS" in top_stock['Signal']:
                         st.warning(f"⚠️ Top stock ({top_stock['Symbol']}) has EARNINGS coming up. Risk of 20% gap. SKIP.")
                     else:
                         st.warning(f"🏆 Top stock ({top_stock['Symbol']}) is {top_stock['Signal']}. Reason: {top_stock['Signal']}")
                     
+                    if "HOT" in top_stock['Signal']:
+                        if use_vol_target:
+                            st.info(f"🛡️ Vol Target Active: Allocation reduced to **{top_stock['Alloc %']:.1f}%** due to volatility ({top_stock['Ann Vol']:.1%}).")
+                        else:
+                            st.info(f"🚀 Sniper Mode: Full **{top_stock['Alloc %']:.0f}%** Allocation.")
+                        st.error(f"🛑 **Set Initial Stop:** ${top_stock['Stop Price']:.2f} (This is a {top_stock['ATR Stop %']:.1f}% Trailing Stop)")
+
                     st.dataframe(
                         df,
                         column_config={
                             "Link": st.column_config.LinkColumn("News"),
-                            "Zone/Action": st.column_config.TextColumn("Zone/Action", help="BUY = Good Trend. SELL = Stop hit or Trend broken."),
                             "Score (Risk Adj)": st.column_config.ProgressColumn("Score", min_value=-5, max_value=5, format="%.2f"),
+                            "Confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=100, format="%d%%"),
                             "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
                             "Vol Ratio": st.column_config.NumberColumn("Vol Ratio", format="%.2f"),
                             "ADX": st.column_config.NumberColumn("ADX (Trend)", format="%.0f"),
+                            "RS vs SPY": st.column_config.NumberColumn("RS vs SPY", format="%.2f%%"),
                             "ATR Stop %": st.column_config.NumberColumn("ATR Stop %", format="%.1f%%"),
                             "Ann Vol": st.column_config.NumberColumn("Ann Vol", format="%.1%"),
                             "Alloc %": st.column_config.NumberColumn("Alloc %", format="%.1f%%"),
@@ -534,7 +649,7 @@ with tab1:
                             "Trail Stop (High)": st.column_config.NumberColumn("Trail Stop (High)", format="$%.2f"),
                             "Highest High (20D)": st.column_config.NumberColumn("Highest High (20D)", format="$%.2f"),
                         },
-                        column_order=("Symbol", "Zone/Action", "Price", "Signal", "Days to Earn", "Alloc %", "SHARES", "Stop Price", "ATR Stop %", "Vol Ratio", "ADX", "Score (Risk Adj)", "Link")
+                        column_order=("Symbol", "Price", "Signal", "Confidence", "RS vs SPY", "Days to Earn", "Alloc %", "SHARES", "Stop Price", "Highest High (20D)", "Trail Stop (High)", "ATR Stop %", "Vol Ratio", "ADX", "Score (Risk Adj)", "Link")
                     )
 
                     # --- AUTO EMAIL LOGIC ---
@@ -549,13 +664,17 @@ with tab1:
                                     st.success(msg)
                                 else:
                                     st.error(msg)
+                    # --- MANUAL BUTTON (BACKUP) ---
+                    elif st.button("📧 Email Top 10 Picks"): # This might still have reset issues without session state, but checkbox is preferred.
+                         st.warning("⚠️ Please use the 'Auto-email' checkbox above the Scan button for better reliability!")
+
                 else:
                     st.error("❌ No data returned.")
             except Exception as e:
                 st.error(f"Critical Download Error: {e}")
 
 # ==========================================
-# TAB 2: BACKTEST & WEALTH SIMULATION
+# TAB 2: BACKTEST & WEALTH SIMULATION (UPDATED)
 # ==========================================
 with tab2:
     st.header(f"Strategy Analysis & Wealth Simulation")
@@ -604,18 +723,48 @@ with tab2:
                 valid_dt = data.index.asof(dt)
                 valid_nxt = data.index.asof(nxt_dt)
                 
+                # --- CALCULATE SPY RETURN FOR THIS MONTH (For RS Comparison) ---
+                try:
+                    spy_curr = monthly_data.loc[dt, "SPY"]
+                    spy_prev = monthly_data.iloc[i-1]["SPY"]
+                    spy_ret_1m = (spy_curr / spy_prev) - 1
+                except: spy_ret_1m = 0
+
                 scores = {}
                 for tick in tickers:
                     if tick not in data.columns: continue
                     try:
                         # Use optimized pre-calculated KAMA
                         if data[tick].loc[valid_dt] > kama_data[tick].loc[valid_dt]:
-                            ret_1m = (monthly_data.loc[dt, tick] - monthly_data.iloc[i-1][tick]) / monthly_data.iloc[i-1][tick]
-                            ret_3m = (monthly_data.loc[dt, tick] - monthly_data.iloc[i-3][tick]) / monthly_data.iloc[i-3][tick]
-                            vol = monthly_vol.loc[dt, tick]
-                            if pd.isna(vol) or vol == 0: vol = 1.0
+                            # Calculate Stock Returns
+                            curr_p = monthly_data.loc[dt, tick]
+                            prev_p = monthly_data.iloc[i-1][tick]
+                            prev_3m = monthly_data.iloc[i-3][tick]
+
+                            ret_1m = (curr_p - prev_p) / prev_p
+                            ret_3m = (curr_p - prev_3m) / prev_3m
+                            
+                            # --- RS CHECK (NEW) ---
+                            # Is the stock beating SPY this month?
+                            rs_diff = ret_1m - spy_ret_1m
+                            
+                            # --- ER CALCULATION ---
+                            hist_slice = data[tick].loc[:valid_dt].tail(30)
+                            if len(hist_slice) > 20:
+                                df_temp = hist_slice.to_frame(name='Close')
+                                er_val = calculate_efficiency_ratio(df_temp, n=20)
+                            else:
+                                er_val = 0
+                            
+                            # --- SCORING (MATCHING LIVE LOGIC) ---
                             raw_momentum = (ret_1m * 2) + ret_3m
-                            scores[tick] = (raw_momentum / vol) if raw_momentum > 0 else raw_momentum
+                            base_score = raw_momentum * er_val
+                            
+                            # Apply RS Bonus/Penalty
+                            if rs_diff > 0: base_score *= 1.2  # 20% Boost for Leaders
+                            if rs_diff < 0: base_score *= 0.5  # 50% Penalty for Laggards
+                            
+                            scores[tick] = base_score
                     except: scores[tick] = -999 
                 
                 top_picks = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:max_positions]
@@ -707,19 +856,13 @@ with tab2:
 # ==========================================
 with tab3:
     st.header("🔎 Sniper Universe Scanner")
+    index_choice = st.radio("Select Universe:", ["S&P 500 (Large Cap)", "S&P 400 (Mid Cap)"], index=0, horizontal=True)
     
-    # --- FORM WRAPPER FIX: PREVENTS DOUBLE CLICK ISSUE ---
-    with st.form("sp500_scanner_form"):
-        index_choice = st.radio("Select Universe:", ["S&P 500 (Large Cap)", "S&P 400 (Mid Cap)"], index=0, horizontal=True)
-        
-        c1, c2 = st.columns(2)
-        dist_threshold = c1.slider("Max % from 52W High", 1, 20, 10) / 100
-        min_volume = c2.number_input("Min Daily Volume ($M)", value=50)
+    c1, c2 = st.columns(2)
+    dist_threshold = c1.slider("Max % from 52W High", 1, 20, 10) / 100
+    min_volume = c2.number_input("Min Daily Volume ($M)", value=50)
 
-        # This button triggers the form
-        run_scan_sp = st.form_submit_button("Scan Market (Batch Mode)")
-
-    if run_scan_sp:
+    if st.button("Scan Market (Batch Mode)"):
         status_text = st.empty()
         if "500" in index_choice:
             status_text.text("⏳ Step 1: Fetching S&P 500 list...")
